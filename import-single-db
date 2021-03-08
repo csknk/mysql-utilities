@@ -1,0 +1,114 @@
+#!/bin/bash
+readonly TIMESTAMP=$(date "+%H%M%S-%d-%m-%Y")
+readonly LOG_DIR=$HOME/mysql-import-log
+readonly LOG=$LOG_DIR/${TIMESTAMP}-log.sql
+readonly UNDO_SCRIPT=$LOG_DIR/rollback/${TIMESTAMP}-drop-dbs.sql
+
+mkdir -p $LOG_DIR/rollback
+
+set() {
+	echo "Enter the MySQL password:"
+	read -s ROOT_PASSWORD
+
+	echo "Enter full path to sql file to import:"
+	read db_source
+	db_source="${db_source/#\~/$HOME}"
+
+	echo "Enter database name. Should match wp_config.php:"
+	read db_name
+
+	echo "Enter new user name:"
+	read db_user
+
+	echo "Enter new user password:"
+	read db_user_pass
+}
+
+build_create_db_sql() {
+	echo "# MySQL commands for ${db_name}" >> ${LOG}
+
+	# Save a DROP query for rollback purposes.
+	# ----------------------------------------
+	drop_db_sql="DROP DATABASE IF EXISTS \`$db_name\`;"
+	printf "%s\n" "${drop_db_sql}" >> ${UNDO_SCRIPT}
+
+	# Build the create query
+	# ----------------------
+	create_db_sql="
+		CREATE DATABASE IF NOT EXISTS \`$db_name\`;
+		GRANT ALL PRIVILEGES ON \`$db_name\`.* TO root@localhost IDENTIFIED BY '$ROOT_PASSWORD';
+	"
+	create_db_sql=${create_db_sql//[$'\t\r\n']}
+	printf "%s\n" "${create_db_sql}" >> ${LOG}
+}
+
+build_create_user_sql() {
+	create_user_sql="
+		GRANT USAGE ON *.* TO '$db_user'@'localhost' IDENTIFIED BY '$db_user_pass';
+		GRANT ALL PRIVILEGES ON \`$db_name\`.* TO '$db_user'@'localhost';
+		FLUSH PRIVILEGES;
+	"
+	create_user_sql=${create_user_sql//[$'\t\r\n']}
+}
+
+# Create new DB then import data from specified sql file.
+run_create_import() {
+	echo "Create database ${db_name}."
+	mysql -v --user=root --password="${ROOT_PASSWORD}" -e "${create_db_sql}"
+	echo "Importing data from ${db_source} to ${db_name}."
+	mysql --user=root --password="${ROOT_PASSWORD}" "$db_name" < "$db_source"
+}
+
+# Create new user for this database
+run_create_new_user() {
+	echo "Create user ${db_user} for ${db_name}."
+	mysql -v --user=root --password="${ROOT_PASSWORD}" -e "${create_user_sql}"
+}
+
+print_queries_and_exit() {
+	echo "${create_db_sql}"
+	echo "mysql --user=root --password=${ROOT_PASSWORD} $db_name < $db_source"
+	echo "${create_user_sql}"
+	exit
+}
+
+cleanup() {
+	echo "Unsetting password variables."
+	unset $ROOT_PASSWORD
+	unset $db_user_pass
+}
+
+set
+build_create_db_sql
+build_create_user_sql
+#print_queries_and_exit
+
+echo "Create a new database using the following query:"
+echo "${create_db_sql}"
+read -p "Do you wish to run this query - create ${db_name} and import data from ${db_source}? [y/N]" PROCEED
+case $PROCEED in
+	[Yy]*)
+		run_create_import
+		;;
+	[Nn]*)
+		echo "No SQL queries will be run."
+		;;
+	*)
+		echo "Please answer yes or no.";;
+esac
+
+echo "Create a new user for $db_name with the following query:"
+echo "${create_user_sql}"
+read -p "Create new user? [y/N]" PROCEED
+case $PROCEED in
+	[Yy]*)
+		run_create_new_user
+		;;
+	[Nn]*)
+		echo "No new user will be created."
+		;;
+	*)
+		echo "Please answer yes or no.";;
+esac
+
+cleanup
